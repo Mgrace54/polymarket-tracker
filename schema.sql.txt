@@ -1,0 +1,137 @@
+-- ============================================================
+-- Polymarket Signal Tracker — Full Schema
+-- Run this in Supabase SQL Editor before deploying the pipeline
+-- ============================================================
+
+-- Master market registry
+CREATE TABLE IF NOT EXISTS markets (
+    market_id        TEXT PRIMARY KEY,
+    question         TEXT NOT NULL,
+    category         TEXT,
+    subcategory      TEXT,
+    resolution_date  TIMESTAMPTZ,
+    first_seen_at    TIMESTAMPTZ DEFAULT NOW(),
+    is_active        BOOLEAN DEFAULT TRUE
+);
+
+-- Outcome registry — one row per outcome per market
+-- Binary markets: both Yes and No stored for schema consistency
+CREATE TABLE IF NOT EXISTS market_outcomes (
+    outcome_id    TEXT PRIMARY KEY,
+    market_id     TEXT REFERENCES markets(market_id),
+    outcome_label TEXT NOT NULL,
+    is_binary     BOOLEAN DEFAULT FALSE
+);
+
+-- Raw intraday snapshots at outcome level — 7-day TTL then rolled to daily
+CREATE TABLE IF NOT EXISTS market_snapshots (
+    id                     BIGSERIAL PRIMARY KEY,
+    outcome_id             TEXT REFERENCES market_outcomes(outcome_id),
+    market_id              TEXT REFERENCES markets(market_id),
+    snapshot_at            TIMESTAMPTZ NOT NULL,
+    probability            NUMERIC(6,4),
+    cumulative_volume_usdc NUMERIC(18,2),
+    period_volume_usdc     NUMERIC(18,2),
+    liquidity_usdc         NUMERIC(18,2),
+    UNIQUE(outcome_id, snapshot_at)
+);
+
+-- Long-term daily aggregates at outcome level — permanent retention
+-- volume_is_market_level: TRUE = V1 approximated volume (probability-weighted)
+--                         FALSE = V2 per-token CLOB volume (exact)
+-- Dashboard queries: use MAX(daily_volume_usdc) per market_id for total market
+-- volume, NOT SUM — summing across outcomes double-counts on binary markets
+-- while volume_is_market_level = TRUE
+CREATE TABLE IF NOT EXISTS market_daily (
+    id                     BIGSERIAL PRIMARY KEY,
+    outcome_id             TEXT REFERENCES market_outcomes(outcome_id),
+    market_id              TEXT REFERENCES markets(market_id),
+    date                   DATE NOT NULL,
+    open_probability       NUMERIC(6,4),
+    close_probability      NUMERIC(6,4),
+    high_probability       NUMERIC(6,4),
+    low_probability        NUMERIC(6,4),
+    delta_probability      NUMERIC(6,4),
+    daily_volume_usdc      NUMERIC(18,2),
+    avg_liquidity_usdc     NUMERIC(18,2),
+    snapshot_count         INTEGER,
+    volume_is_market_level BOOLEAN DEFAULT TRUE,
+    UNIQUE(outcome_id, date)
+);
+
+-- Computed spike signals — one row per outcome per compute run
+-- dp_dv_raw:       signed ΔP/ΔV (direction preserved)
+-- dp_dv_magnitude: ABS(dp_dv_raw) — used for ranking
+-- dp_dv_direction: 1 = bullish, -1 = bearish, 0 = flat
+-- composite_score: mean(z_score_rank, dp_dv_rank)
+--                  falls back to z_score_rank alone if dp_dv gate failed
+CREATE TABLE IF NOT EXISTS spike_signals (
+    id               BIGSERIAL PRIMARY KEY,
+    outcome_id       TEXT REFERENCES market_outcomes(outcome_id),
+    market_id        TEXT REFERENCES markets(market_id),
+    computed_at      TIMESTAMPTZ NOT NULL,
+    window_days      INTEGER DEFAULT 5,
+    volume_z_score   NUMERIC(8,4),
+    dp_dv_raw        NUMERIC(14,8),
+    dp_dv_magnitude  NUMERIC(14,8),
+    dp_dv_direction  SMALLINT CHECK (dp_dv_direction IN (-1, 0, 1)),
+    z_score_rank     NUMERIC(5,4),
+    dp_dv_rank       NUMERIC(5,4),
+    composite_score  NUMERIC(5,4),
+    UNIQUE(outcome_id, computed_at)
+);
+
+-- Top-X ledger — permanent historical record
+-- top_n: the configured X value at time of run (allows top_n changes over time)
+-- rank_position: 1 = highest composite score
+CREATE TABLE IF NOT EXISTS daily_topx (
+    id              BIGSERIAL PRIMARY KEY,
+    snapshot_date   DATE NOT NULL,
+    top_n           INTEGER NOT NULL,
+    rank_position   INTEGER NOT NULL,
+    outcome_id      TEXT REFERENCES market_outcomes(outcome_id),
+    market_id       TEXT REFERENCES markets(market_id),
+    outcome_label   TEXT NOT NULL,
+    market_question TEXT NOT NULL,
+    composite_score NUMERIC(5,4),
+    volume_z_score  NUMERIC(8,4),
+    dp_dv_raw       NUMERIC(14,8),
+    dp_dv_direction SMALLINT,
+    UNIQUE(snapshot_date, rank_position)
+);
+
+-- Pipeline config — single source of truth for all job parameters
+Connection String:
+postgresql://postgres:[YOUR-PASSWORD]@db.thmpmptbywdgysylpekd.supabase.co:5432/postgres
+
+-- Edit values here to change behavior without touching code
+CREATE TABLE IF NOT EXISTS pipeline_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+INSERT INTO pipeline_config VALUES
+    ('top_n',                     '10'),
+    ('window_days',               '5'),
+    ('snapshot_ttl_days',         '7'),
+    ('volume_floor_usdc',         '1000'),
+    ('volume_percentile_floor',   '0.20'),
+    ('dp_dv_min_volume',          '10'),
+    ('polling_interval_minutes',  '15'),
+    ('dp_dv_threshold_pct',       '0.15'),
+    ('dp_dv_absolute_floor_usdc', '5.0')
+ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- Indexes
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_outcome_time  ON market_snapshots(outcome_id, snapshot_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_market_time   ON market_snapshots(market_id, snapshot_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_ttl           ON market_snapshots(snapshot_at);
+CREATE INDEX IF NOT EXISTS idx_signals_composite       ON spike_signals(composite_score DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_outcome_time    ON spike_signals(outcome_id, computed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_daily_outcome_date      ON market_daily(outcome_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_topx_date_rank          ON daily_topx(snapshot_date DESC, rank_position);
+CREATE INDEX IF NOT EXISTS idx_markets_active          ON markets(is_active);
+CREATE INDEX IF NOT EXISTS idx_markets_first_seen      ON markets(first_seen_at);

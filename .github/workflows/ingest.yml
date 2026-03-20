@@ -1,0 +1,35 @@
+name: polymarket-ingest
+
+on:
+  schedule:
+    # Every 45 minutes. GitHub Actions cron minimum is 5 min,
+    # but does not guarantee exact timing — expect +/- 5 min drift.
+    # Two cron expressions to approximate 45-min intervals:
+    #   :00, :45 on even hours | :15, :30 on odd hours... 
+    # Simpler: run every 15 min and let the script be idempotent.
+    # ON CONFLICT DO NOTHING in insert_snapshot handles duplicate runs cleanly.
+    - cron: "0,15,30,45 * * * *"   # runs every 15 min, uses ~720 min/month free
+  workflow_dispatch:                 # allows manual trigger from GitHub UI
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingest
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python ingest.py

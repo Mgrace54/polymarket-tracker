@@ -1,0 +1,29 @@
+name: polymarket-rollup
+
+on:
+  schedule:
+    - cron: "5 0 * * *"    # 00:05 UTC daily — after compute_signals midnight run
+  workflow_dispatch:
+
+jobs:
+  rollup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rollup
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python rollup.py

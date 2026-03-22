@@ -368,6 +368,9 @@ def main() -> None:
             errors += 1
             continue
 
+    log.info(
+        f"=== ingest.py complete ===
+
     # -- Summary --------------------------------------------------------------
     log.info(
         f"=== ingest.py complete === "

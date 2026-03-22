@@ -369,13 +369,9 @@ def main() -> None:
             continue
 
     log.info(
-        f"=== ingest.py complete ===
-
-    # -- Summary --------------------------------------------------------------
-    log.info(
         f"=== ingest.py complete === "
-        f"markets={markets_processed} outcomes={outcomes_processed} "
-        f"snapshots={snapshots_inserted} errors={errors}"
+        f"markets={len(market_rows)} outcomes={len(outcome_rows)} "
+        f"snapshots={len(snapshot_rows)} parse_errors={parse_errors}"
     )
 
     cur.close()

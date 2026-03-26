@@ -67,6 +67,12 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
       - have at least min_snapshots rows within the window
     Returns per-outcome snapshot aggregates needed for signal computation.
     """
+    # Confirm data exists in window before running expensive aggregation
+    cur.execute("SELECT COUNT(*) FROM market_snapshots WHERE snapshot_at >= %s", (window_start,))
+    count = cur.fetchone()[0]
+    log.info(f"Snapshots in window: {count}")
+
+    cur.execute("SET LOCAL statement_timeout = '120s'")
     cur.execute(
         """
         SELECT
@@ -77,17 +83,14 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
             m.category,
             COUNT(*)           AS snapshot_count,
 
-            -- Volume series for z-score (log-transformed)
             ARRAY_AGG(
                 ms.period_volume_usdc ORDER BY ms.snapshot_at
             )                  AS volume_series,
 
-            -- Probability series for ΔP computation
             ARRAY_AGG(
                 ms.probability ORDER BY ms.snapshot_at
             )                  AS probability_series,
 
-            -- Most recent values
             (ARRAY_AGG(ms.period_volume_usdc ORDER BY ms.snapshot_at DESC))[1]
                                AS latest_period_volume,
             (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[1]
@@ -95,7 +98,6 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
             (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[2]
                                AS prior_probability,
 
-            -- Averages for ΔP/ΔV gate
             AVG(ms.period_volume_usdc) AS avg_period_volume
 
         FROM market_snapshots ms

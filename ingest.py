@@ -149,22 +149,37 @@ def parse_outcomes(market: dict) -> list[dict]:
     return results
 
 
-def get_last_cumulative_volumes(cur, outcome_ids: list[str]) -> dict[str, float]:
+def get_last_cumulative_volumes(cur, outcome_ids: list[str], chunk_size: int = 1000) -> dict[str, float]:
+    """
+    Fetch most recent cumulative_volume_usdc per outcome in chunks
+    to avoid statement timeouts on large IN/ANY queries.
+    Uses a 25-second statement timeout per chunk.
+    """
     if not outcome_ids:
         return {}
 
-    cur.execute(
-        """
-        SELECT DISTINCT ON (outcome_id)
-            outcome_id,
-            cumulative_volume_usdc
-        FROM market_snapshots
-        WHERE outcome_id = ANY(%s)
-        ORDER BY outcome_id, snapshot_at DESC
-        """,
-        (outcome_ids,),
-    )
-    return {row[0]: float(row[1]) for row in cur.fetchall()}
+    results = {}
+    chunks = [outcome_ids[i:i + chunk_size] for i in range(0, len(outcome_ids), chunk_size)]
+    log.info(f"Fetching prior volumes in {len(chunks)} chunks of up to {chunk_size}")
+
+    for chunk in chunks:
+        cur.execute("SET LOCAL statement_timeout = '25s'")
+        cur.execute(
+            """
+            SELECT DISTINCT ON (outcome_id)
+                outcome_id,
+                cumulative_volume_usdc
+            FROM market_snapshots
+            WHERE outcome_id = ANY(%s)
+            ORDER BY outcome_id, snapshot_at DESC
+            """,
+            (chunk,),
+        )
+        for row in cur.fetchall():
+            results[row[0]] = float(row[1])
+
+    log.info(f"Prior volumes fetched: {len(results)} outcomes")
+    return results
 
 
 def main() -> None:

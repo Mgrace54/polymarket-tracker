@@ -62,58 +62,95 @@ def load_config(cur) -> dict:
 
 def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> list[dict]:
     """
-    Return all outcomes that:
-      - belong to a market first seen before the window start (>= window_days old)
-      - have at least min_snapshots rows within the window
-    Returns per-outcome snapshot aggregates needed for signal computation.
+    Two-pass approach to avoid ARRAY_AGG timeout on large snapshot tables:
+    Pass 1: Fast COUNT query to find eligible outcome_ids (no arrays)
+    Pass 2: Fetch array data for eligible outcomes in chunks of 500
     """
-    # Confirm data exists in window before running expensive aggregation
-    cur.execute("SELECT COUNT(*) FROM market_snapshots WHERE snapshot_at >= %s", (window_start,))
-    count = cur.fetchone()[0]
-    log.info(f"Snapshots in window: {count}")
-
-    cur.execute("SET LOCAL statement_timeout = '120s'")
+    # Pass 1: find eligible outcome_ids with sufficient snapshot coverage
+    log.info("Pass 1: finding eligible outcomes by snapshot count...")
+    cur.execute("SET LOCAL statement_timeout = '60s'")
     cur.execute(
         """
         SELECT
             ms.outcome_id,
             ms.market_id,
             mo.outcome_label,
-            m.question         AS market_question,
+            m.question AS market_question,
             m.category,
-            COUNT(*)           AS snapshot_count,
-
-            ARRAY_AGG(
-                ms.period_volume_usdc ORDER BY ms.snapshot_at
-            )                  AS volume_series,
-
-            ARRAY_AGG(
-                ms.probability ORDER BY ms.snapshot_at
-            )                  AS probability_series,
-
-            (ARRAY_AGG(ms.period_volume_usdc ORDER BY ms.snapshot_at DESC))[1]
-                               AS latest_period_volume,
-            (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[1]
-                               AS latest_probability,
-            (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[2]
-                               AS prior_probability,
-
-            AVG(ms.period_volume_usdc) AS avg_period_volume
-
+            COUNT(*)   AS snapshot_count
         FROM market_snapshots ms
-        JOIN market_outcomes  mo ON mo.outcome_id = ms.outcome_id
-        JOIN markets          m  ON m.market_id   = ms.market_id
+        JOIN market_outcomes mo ON mo.outcome_id = ms.outcome_id
+        JOIN markets m ON m.market_id = ms.market_id
         WHERE ms.snapshot_at >= %s
           AND m.is_active = TRUE
-        GROUP BY
-            ms.outcome_id, ms.market_id, mo.outcome_label,
-            m.question, m.category
+        GROUP BY ms.outcome_id, ms.market_id, mo.outcome_label, m.question, m.category
         HAVING COUNT(*) >= %s
         """,
         (window_start, min_snapshots),
     )
-    cols = [desc[0] for desc in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    eligible = cur.fetchall()
+    log.info(f"Pass 1 complete: {len(eligible)} eligible outcomes found")
+
+    if not eligible:
+        return []
+
+    # Build metadata lookup from pass 1
+    meta = {}
+    for row in eligible:
+        meta[row[0]] = {
+            "outcome_id":      row[0],
+            "market_id":       row[1],
+            "outcome_label":   row[2],
+            "market_question": row[3],
+            "category":        row[4],
+            "snapshot_count":  row[5],
+        }
+
+    eligible_ids = list(meta.keys())
+
+    # Pass 2: fetch array data in chunks of 500 to avoid timeouts
+    log.info(f"Pass 2: fetching signal data in chunks...")
+    chunk_size = 500
+    chunks = [eligible_ids[i:i+chunk_size] for i in range(0, len(eligible_ids), chunk_size)]
+    results = []
+
+    for chunk_num, chunk in enumerate(chunks):
+        cur.execute("SET LOCAL statement_timeout = '30s'")
+        cur.execute(
+            """
+            SELECT
+                ms.outcome_id,
+                AVG(ms.period_volume_usdc)                                          AS avg_period_volume,
+                (ARRAY_AGG(ms.period_volume_usdc ORDER BY ms.snapshot_at ASC))      AS volume_series,
+                (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at ASC))      AS probability_series,
+                (ARRAY_AGG(ms.period_volume_usdc ORDER BY ms.snapshot_at DESC))[1]  AS latest_period_volume,
+                (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[1]  AS latest_probability,
+                (ARRAY_AGG(ms.probability        ORDER BY ms.snapshot_at DESC))[2]  AS prior_probability
+            FROM market_snapshots ms
+            WHERE ms.outcome_id = ANY(%s)
+              AND ms.snapshot_at >= %s
+            GROUP BY ms.outcome_id
+            """,
+            (chunk, window_start),
+        )
+        for row in cur.fetchall():
+            oid = row[0]
+            if oid in meta:
+                results.append({
+                    **meta[oid],
+                    "avg_period_volume":   row[1],
+                    "volume_series":       row[2],
+                    "probability_series":  row[3],
+                    "latest_period_volume": row[4],
+                    "latest_probability":  row[5],
+                    "prior_probability":   row[6],
+                })
+
+        if (chunk_num + 1) % 5 == 0:
+            log.info(f"  Processed {chunk_num + 1}/{len(chunks)} chunks ({len(results)} outcomes so far)")
+
+    log.info(f"Pass 2 complete: {len(results)} outcomes with signal data")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -428,4 +465,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-# cache bust 03/26/2026 07:47:54

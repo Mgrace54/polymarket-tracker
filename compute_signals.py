@@ -102,14 +102,13 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
         JOIN market_outcomes  mo ON mo.outcome_id = ms.outcome_id
         JOIN markets          m  ON m.market_id   = ms.market_id
         WHERE ms.snapshot_at >= %s
-          AND m.first_seen_at < %s       -- market must predate the window start
           AND m.is_active = TRUE
         GROUP BY
             ms.outcome_id, ms.market_id, mo.outcome_label,
             m.question, m.category
         HAVING COUNT(*) >= %s
         """,
-        (window_start, window_start, min_snapshots),
+        (window_start, min_snapshots),
     )
     cols = [desc[0] for desc in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]

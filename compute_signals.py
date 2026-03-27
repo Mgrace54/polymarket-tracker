@@ -184,7 +184,8 @@ def compute_z_score(volume_series: list[Optional[float]]) -> Optional[float]:
     if len(values) < 2:
         return None
 
-    values = [float(v) for v in values if v is not None]`n    log_values = np.log1p(values)
+    values = [float(v) for v in values if v is not None]
+    log_values = np.log1p(values)
     mean  = np.mean(log_values)
     std   = np.std(log_values, ddof=1)   # sample std dev
 

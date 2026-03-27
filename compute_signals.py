@@ -180,11 +180,10 @@ def compute_z_score(volume_series: list[Optional[float]]) -> Optional[float]:
     log1p(x) = log(1 + x) — safe for zero-volume periods.
     Returns None if standard deviation is zero (flat series = no signal).
     """
-    values = [v for v in volume_series if v is not None]
+    values = [float(v) for v in volume_series if v is not None]
     if len(values) < 2:
         return None
 
-    values = [float(v) for v in values if v is not None]
     log_values = np.log1p(values)
     mean  = np.mean(log_values)
     std   = np.std(log_values, ddof=1)   # sample std dev
@@ -217,10 +216,10 @@ def compute_dp_dv(
         direction       — -1, 0, or 1      (None if dp_dv_raw is None)
     """
     # Gate check
-    relative_threshold = avg_period_volume * threshold_pct
+    relative_threshold = float(avg_period_volume) * threshold_pct
     if (
-        latest_period_volume < relative_threshold
-        or latest_period_volume < absolute_floor
+        float(latest_period_volume) < relative_threshold
+        or float(latest_period_volume) < absolute_floor
     ):
         return None, None, None
 
@@ -228,8 +227,8 @@ def compute_dp_dv(
     if latest_probability is None or prior_probability is None:
         return None, None, None
 
-    delta_p = latest_probability - prior_probability
-    delta_v = latest_period_volume
+    delta_p = float(latest_probability) - float(prior_probability)
+    delta_v = float(latest_period_volume)
 
     if delta_v == 0:
         return None, None, None
@@ -370,7 +369,7 @@ def main() -> None:
     # Minimum snapshots = 1 per hour over the window (conservative lower bound)
     # At 15-min polling: 4 snapshots/hr * 24 hrs * window_days
     # We use a lenient floor of 50% of theoretical max to allow for gaps/downtime
-    min_snapshots = int(config.get("min_snapshots_override", "20"))
+    min_snapshots = int((60 / 15) * 24 * window_days * 0.5)
     log.info(
         f"Config: window={window_days}d, top_n={top_n}, "
         f"dp_dv_pct={dp_dv_threshold_pct}, floor=${dp_dv_absolute_floor}, "
@@ -396,8 +395,8 @@ def main() -> None:
         z_score = compute_z_score(o["volume_series"])
 
         dp_dv_raw, dp_dv_magnitude, direction = compute_dp_dv(
-            latest_probability   = o["latest_probability"],
-            prior_probability    = o["prior_probability"],
+            latest_probability   = float(o["latest_probability"] or 0),
+            prior_probability    = float(o["prior_probability"] or 0),
             latest_period_volume = float(o["latest_period_volume"] or 0),
             avg_period_volume    = float(o["avg_period_volume"] or 0),
             threshold_pct        = dp_dv_threshold_pct,
@@ -482,4 +481,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

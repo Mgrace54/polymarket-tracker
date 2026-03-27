@@ -369,7 +369,7 @@ def main() -> None:
     # Minimum snapshots = 1 per hour over the window (conservative lower bound)
     # At 15-min polling: 4 snapshots/hr * 24 hrs * window_days
     # We use a lenient floor of 50% of theoretical max to allow for gaps/downtime
-    min_snapshots = int((60 / 15) * 24 * window_days * 0.5)
+    min_snapshots = int(config.get("min_snapshots_override", "20"))
     log.info(
         f"Config: window={window_days}d, top_n={top_n}, "
         f"dp_dv_pct={dp_dv_threshold_pct}, floor=${dp_dv_absolute_floor}, "

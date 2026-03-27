@@ -68,28 +68,42 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
     """
     # Pass 1: find eligible outcome_ids with sufficient snapshot coverage
     log.info("Pass 1: finding eligible outcomes by snapshot count...")
-    cur.execute("SET LOCAL statement_timeout = '60s'")
+    # No SET LOCAL - connection pooler ignores it; rely on ALTER ROLE timeout
+    # Simplified query: count snapshots per outcome only, no JOINs
     cur.execute(
         """
-        SELECT
-            ms.outcome_id,
-            ms.market_id,
-            mo.outcome_label,
-            m.question AS market_question,
-            m.category,
-            COUNT(*)   AS snapshot_count
-        FROM market_snapshots ms
-        JOIN market_outcomes mo ON mo.outcome_id = ms.outcome_id
-        JOIN markets m ON m.market_id = ms.market_id
-        WHERE ms.snapshot_at >= %s
-          AND m.is_active = TRUE
-        GROUP BY ms.outcome_id, ms.market_id, mo.outcome_label, m.question, m.category
+        SELECT outcome_id, market_id, COUNT(*) AS snapshot_count
+        FROM market_snapshots
+        WHERE snapshot_at >= %s
+        GROUP BY outcome_id, market_id
         HAVING COUNT(*) >= %s
         """,
         (window_start, min_snapshots),
     )
-    eligible = cur.fetchall()
-    log.info(f"Pass 1 complete: {len(eligible)} eligible outcomes found")
+    eligible_raw = cur.fetchall()
+    log.info(f"Pass 1 complete: {len(eligible_raw)} eligible outcomes found")
+
+    # Fetch outcome labels and market metadata in one batch query
+    eligible_outcome_ids = [row[0] for row in eligible_raw]
+    cur.execute(
+        """
+        SELECT mo.outcome_id, mo.outcome_label, m.question, m.category
+        FROM market_outcomes mo
+        JOIN markets m ON m.market_id = mo.market_id
+        WHERE mo.outcome_id = ANY(%s)
+          AND m.is_active = TRUE
+        """,
+        (eligible_outcome_ids,),
+    )
+    meta_rows = {row[0]: (row[1], row[2], row[3]) for row in cur.fetchall()}
+
+    # Filter to only active markets and build eligible list
+    eligible = [
+        (row[0], row[1], row[2])
+        for row in eligible_raw
+        if row[0] in meta_rows
+    ]
+    log.info(f"Pass 1 after active market filter: {len(eligible)} eligible outcomes")
 
     if not eligible:
         return []
@@ -97,13 +111,16 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
     # Build metadata lookup from pass 1
     meta = {}
     for row in eligible:
-        meta[row[0]] = {
-            "outcome_id":      row[0],
-            "market_id":       row[1],
-            "outcome_label":   row[2],
-            "market_question": row[3],
-            "category":        row[4],
-            "snapshot_count":  row[5],
+        outcome_id = row[0]
+        market_id  = row[1]
+        label, question, category = meta_rows.get(outcome_id, ("", "", ""))
+        meta[outcome_id] = {
+            "outcome_id":      outcome_id,
+            "market_id":       market_id,
+            "outcome_label":   label,
+            "market_question": question,
+            "category":        category,
+            "snapshot_count":  row[2],
         }
 
     eligible_ids = list(meta.keys())
@@ -115,7 +132,6 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
     results = []
 
     for chunk_num, chunk in enumerate(chunks):
-        cur.execute("SET LOCAL statement_timeout = '30s'")
         cur.execute(
             """
             SELECT
@@ -353,7 +369,7 @@ def main() -> None:
     # Minimum snapshots = 1 per hour over the window (conservative lower bound)
     # At 15-min polling: 4 snapshots/hr * 24 hrs * window_days
     # We use a lenient floor of 50% of theoretical max to allow for gaps/downtime
-    min_snapshots = 20
+    min_snapshots = int((60 / 15) * 24 * window_days * 0.5)
     log.info(
         f"Config: window={window_days}d, top_n={top_n}, "
         f"dp_dv_pct={dp_dv_threshold_pct}, floor=${dp_dv_absolute_floor}, "

@@ -127,7 +127,7 @@ def fetch_eligible_outcomes(cur, window_start: datetime, min_snapshots: int) -> 
 
     # Pass 2: fetch array data in chunks of 500 to avoid timeouts
     log.info(f"Pass 2: fetching signal data in chunks...")
-    chunk_size = 500
+    chunk_size = 2000
     chunks = [eligible_ids[i:i+chunk_size] for i in range(0, len(eligible_ids), chunk_size)]
     results = []
 

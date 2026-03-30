@@ -300,6 +300,172 @@ def load_new_markets(start_date: date, end_date: date, categories: Optional[tupl
         )
 
 
+@st.cache_data(ttl=900)
+def load_volume_metrics(categories: Optional[tuple]) -> dict:
+    """
+    USDC volume metrics across tracked markets.
+    Uses market_daily for yesterday aggregate + market_snapshots for intraday delta.
+    Volume is market-level (use MAX per market to avoid double-counting binary outcomes).
+    """
+    cat_filter = list(categories) if categories else None
+    yesterday = date.today() - timedelta(days=1)
+
+    if cat_filter:
+        df = query(
+            """
+            SELECT
+                MAX(md.daily_volume_usdc)  AS market_volume,
+                MAX(md.avg_liquidity_usdc) AS market_liquidity
+            FROM market_daily md
+            JOIN markets m ON m.market_id = md.market_id
+            WHERE md.date = %s
+              AND m.category = ANY(%s)
+              AND md.volume_is_market_level = TRUE
+            """,
+            (yesterday, cat_filter),
+        )
+    else:
+        df = query(
+            """
+            SELECT
+                MAX(md.daily_volume_usdc)  AS market_volume,
+                MAX(md.avg_liquidity_usdc) AS market_liquidity
+            FROM market_daily md
+            WHERE md.date = %s
+              AND md.volume_is_market_level = TRUE
+            """,
+            (yesterday,),
+        )
+
+    total_volume    = float(df["market_volume"].sum())   if not df.empty else 0
+    total_liquidity = float(df["market_liquidity"].sum()) if not df.empty else 0
+    return {"total_volume": total_volume, "total_liquidity": total_liquidity}
+
+
+@st.cache_data(ttl=900)
+def load_category_volume(start_date: date, end_date: date, categories: Optional[tuple]) -> pd.DataFrame:
+    """
+    Daily volume per category over the date range for the bar chart.
+    Uses MAX per market per day to avoid double-counting binary outcomes.
+    """
+    cat_filter = list(categories) if categories else None
+
+    if cat_filter:
+        return query(
+            """
+            SELECT
+                md.date,
+                m.category,
+                SUM(subq.market_volume) AS total_volume
+            FROM (
+                SELECT market_id, date, MAX(daily_volume_usdc) AS market_volume
+                FROM market_daily
+                WHERE date BETWEEN %s AND %s
+                  AND volume_is_market_level = TRUE
+                GROUP BY market_id, date
+            ) subq
+            JOIN market_daily md ON md.market_id = subq.market_id AND md.date = subq.date
+            JOIN markets m ON m.market_id = subq.market_id
+            WHERE m.category = ANY(%s)
+            GROUP BY md.date, m.category
+            ORDER BY md.date, total_volume DESC
+            """,
+            (start_date, end_date, cat_filter),
+        )
+    else:
+        return query(
+            """
+            SELECT
+                subq.date,
+                m.category,
+                SUM(subq.market_volume) AS total_volume
+            FROM (
+                SELECT market_id, date, MAX(daily_volume_usdc) AS market_volume
+                FROM market_daily
+                WHERE date BETWEEN %s AND %s
+                  AND volume_is_market_level = TRUE
+                GROUP BY market_id, date
+            ) subq
+            JOIN markets m ON m.market_id = subq.market_id
+            GROUP BY subq.date, m.category
+            ORDER BY subq.date, total_volume DESC
+            """,
+            (start_date, end_date),
+        )
+
+
+@st.cache_data(ttl=900)
+def load_topx_with_volume(snapshot_date: date, top_n: int, categories: Optional[tuple]) -> pd.DataFrame:
+    """
+    Top-X enriched with latest volume and liquidity from market_snapshots.
+    Joins to most recent snapshot per market for intraday volume data.
+    """
+    cat_filter = list(categories) if categories else None
+    if cat_filter:
+        return query(
+            """
+            SELECT
+                t.rank_position,
+                t.market_question,
+                t.outcome_label,
+                m.category,
+                t.composite_score,
+                t.volume_z_score,
+                t.dp_dv_raw,
+                t.dp_dv_direction,
+                snap.cumulative_volume_usdc,
+                snap.period_volume_usdc,
+                snap.liquidity_usdc
+            FROM daily_topx t
+            JOIN markets m ON m.market_id = t.market_id
+            LEFT JOIN LATERAL (
+                SELECT cumulative_volume_usdc, period_volume_usdc, liquidity_usdc
+                FROM market_snapshots ms
+                WHERE ms.outcome_id = t.outcome_id
+                ORDER BY snapshot_at DESC
+                LIMIT 1
+            ) snap ON TRUE
+            WHERE t.snapshot_date = %s
+              AND t.top_n = %s
+              AND m.category = ANY(%s)
+            ORDER BY t.rank_position
+            LIMIT %s
+            """,
+            (snapshot_date, top_n, cat_filter, top_n),
+        )
+    else:
+        return query(
+            """
+            SELECT
+                t.rank_position,
+                t.market_question,
+                t.outcome_label,
+                m.category,
+                t.composite_score,
+                t.volume_z_score,
+                t.dp_dv_raw,
+                t.dp_dv_direction,
+                snap.cumulative_volume_usdc,
+                snap.period_volume_usdc,
+                snap.liquidity_usdc
+            FROM daily_topx t
+            JOIN markets m ON m.market_id = t.market_id
+            LEFT JOIN LATERAL (
+                SELECT cumulative_volume_usdc, period_volume_usdc, liquidity_usdc
+                FROM market_snapshots ms
+                WHERE ms.outcome_id = t.outcome_id
+                ORDER BY snapshot_at DESC
+                LIMIT 1
+            ) snap ON TRUE
+            WHERE t.snapshot_date = %s
+              AND t.top_n = %s
+            ORDER BY t.rank_position
+            LIMIT %s
+            """,
+            (snapshot_date, top_n, top_n),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers
 # ---------------------------------------------------------------------------
@@ -325,10 +491,26 @@ def score_fmt(val) -> str:
         return "—"
 
 
+def fmt_usdc(val) -> str:
+    """Format USDC value with K/M suffix."""
+    try:
+        v = float(val)
+        if v >= 1_000_000:
+            return f"${v/1_000_000:.1f}M"
+        elif v >= 1_000:
+            return f"${v/1_000:.1f}K"
+        else:
+            return f"${v:.0f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
 def render_topx_table(df: pd.DataFrame) -> None:
     if df.empty:
         st.info("No data for the selected filters.")
         return
+
+    has_volume = "cumulative_volume_usdc" in df.columns
 
     rows_html = ""
     for _, row in df.iterrows():
@@ -336,9 +518,19 @@ def render_topx_table(df: pd.DataFrame) -> None:
         composite_cell = score_fmt(row.get("composite_score"))
         z_score_cell   = score_fmt(row.get("volume_z_score"))
 
-        # Truncate long questions
         question = str(row.get("market_question", ""))
-        question_display = question if len(question) <= 72 else question[:69] + "…"
+        question_display = question if len(question) <= 60 else question[:57] + "…"
+
+        vol_cell    = fmt_usdc(row.get("cumulative_volume_usdc")) if has_volume else "—"
+        delta_cell  = fmt_usdc(row.get("period_volume_usdc"))     if has_volume else "—"
+        liq_cell    = fmt_usdc(row.get("liquidity_usdc"))         if has_volume else "—"
+
+        # Color the period volume delta green if positive
+        try:
+            period_v = float(row.get("period_volume_usdc") or 0)
+            delta_color = "#3fb950" if period_v > 0 else "#8b949e"
+        except (TypeError, ValueError):
+            delta_color = "#8b949e"
 
         rows_html += f"""
         <tr>
@@ -348,8 +540,16 @@ def render_topx_table(df: pd.DataFrame) -> None:
             <td><span style="background:#1c2128;padding:2px 6px;border-radius:3px;font-size:0.75rem">{row.get('category', '—')}</span></td>
             <td>{direction_cell} {composite_cell}</td>
             <td>{z_score_cell}</td>
+            <td style="font-family:'IBM Plex Mono',monospace;font-size:0.8rem">{vol_cell}</td>
+            <td style="font-family:'IBM Plex Mono',monospace;font-size:0.8rem;color:{delta_color}">{delta_cell}</td>
+            <td style="font-family:'IBM Plex Mono',monospace;font-size:0.8rem;color:#8b949e">{liq_cell}</td>
         </tr>
         """
+
+    volume_headers = """
+                    <th>Total Vol</th>
+                    <th>Δ Vol</th>
+                    <th>Liquidity</th>""" if has_volume else ""
 
     st.markdown(
         f"""
@@ -362,6 +562,7 @@ def render_topx_table(df: pd.DataFrame) -> None:
                     <th>Category</th>
                     <th>Composite ↑↓</th>
                     <th>Vol Z-Score</th>
+                    {volume_headers}
                 </tr>
             </thead>
             <tbody>{rows_html}</tbody>
@@ -481,6 +682,58 @@ def render_composite_history(df: pd.DataFrame) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+def render_category_volume(df: pd.DataFrame) -> None:
+    """Stacked bar chart of daily USDC volume by category."""
+    if df.empty:
+        st.caption("No volume data available for this period.")
+        return
+
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+    df["total_volume"] = df["total_volume"].astype(float)
+
+    # Keep top 8 categories by total volume, group rest as "Other"
+    top_cats = (
+        df.groupby("category")["total_volume"]
+        .sum()
+        .nlargest(8)
+        .index.tolist()
+    )
+    df["cat_display"] = df["category"].apply(lambda c: c if c in top_cats else "Other")
+
+    plot_df = df.groupby(["date", "cat_display"])["total_volume"].sum().reset_index()
+
+    fig = px.bar(
+        plot_df,
+        x="date",
+        y="total_volume",
+        color="cat_display",
+        labels={"date": "", "total_volume": "USDC Volume", "cat_display": ""},
+        barmode="stack",
+    )
+    fig.update_yaxes(
+        gridcolor="#21262d",
+        tickprefix="$",
+        tickformat=",.0f",
+    )
+    fig.update_xaxes(gridcolor="#21262d")
+    fig.update_layout(
+        plot_bgcolor="#0d1117",
+        paper_bgcolor="#0d1117",
+        font=dict(family="IBM Plex Mono", color="#8b949e", size=11),
+        legend=dict(
+            bgcolor="#161b22",
+            bordercolor="#30363d",
+            borderwidth=1,
+            font=dict(size=10),
+        ),
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=340,
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
 def render_new_markets(df: pd.DataFrame) -> None:
     if df.empty:
         st.caption("No new markets in the selected window.")
@@ -591,7 +844,10 @@ st.caption(f"Ranked by composite score (Vol Z-Score + |ΔP/ΔV|) · {today.strft
 # Summary metrics row
 col1, col2, col3, col4 = st.columns(4)
 
-topx_today = load_topx(today, top_n, active_categories)
+topx_today = load_topx_with_volume(
+    today, top_n,
+    tuple(active_categories) if active_categories else None
+)
 
 with col1:
     st.metric("Outcomes Ranked", len(topx_today))
@@ -614,6 +870,25 @@ with col4:
         st.metric("Dominant Category", top_cat)
     else:
         st.metric("Dominant Category", "—")
+
+# Volume metrics panel
+vol_metrics = load_volume_metrics(
+    tuple(active_categories) if active_categories else None
+)
+vcol1, vcol2, vcol3 = st.columns(3)
+with vcol1:
+    st.metric(
+        "Total USDC Volume (yesterday)",
+        fmt_usdc(vol_metrics["total_volume"]) if vol_metrics["total_volume"] else "—",
+    )
+with vcol2:
+    st.metric(
+        "Total Liquidity",
+        fmt_usdc(vol_metrics["total_liquidity"]) if vol_metrics["total_liquidity"] else "—",
+    )
+with vcol3:
+    active_count = query("SELECT COUNT(*) as c FROM markets WHERE is_active = TRUE").iloc[0]["c"]
+    st.metric("Active Markets", f"{int(active_count):,}")
 
 st.markdown("")
 render_topx_table(topx_today)
@@ -644,6 +919,21 @@ with chart_col2:
     st.markdown("### Composite Score")
     st.caption("Signal strength over time — higher = stronger")
     render_composite_history(hist_df)
+
+# ---------------------------------------------------------------------------
+# Category volume
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("## Volume by Category")
+st.caption(f"Daily USDC volume across top categories · {start_date.strftime('%b %d')} → {end_date.strftime('%b %d, %Y')}")
+
+cat_vol_df = load_category_volume(
+    start_date,
+    end_date,
+    tuple(active_categories) if active_categories else None,
+)
+render_category_volume(cat_vol_df)
 
 # ---------------------------------------------------------------------------
 # New markets (topic emergence)

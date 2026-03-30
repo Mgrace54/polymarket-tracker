@@ -23,6 +23,7 @@ import plotly.graph_objects as go
 import psycopg2
 import psycopg2.extras
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ---------------------------------------------------------------------------
 # Page config — must be first Streamlit call
@@ -560,7 +561,11 @@ def render_topx_table(df: pd.DataFrame) -> None:
         + rows_html
         + "</tbody></table>"
     )
-    st.markdown(table_html, unsafe_allow_html=True)
+    components.html(
+        f"<style>.signal-table{{width:100%;border-collapse:collapse;font-family:'IBM Plex Mono',monospace;font-size:0.82rem}}.signal-table th{{background:#161b22;color:#8b949e;text-transform:uppercase;font-size:0.72rem;padding:8px 12px;border-bottom:1px solid #30363d;text-align:left}}.signal-table td{{padding:10px 12px;border-bottom:1px solid #21262d;color:#e6edf3}}.score-pill{{background:#1c2128;border:1px solid #30363d;border-radius:4px;padding:2px 8px}}.dir-up{{color:#3fb950}}.dir-down{{color:#f85149}}.dir-flat{{color:#8b949e}}</style>{table_html}",
+        height=600,
+        scrolling=True,
+    )
 
 
 def render_rank_trend(df: pd.DataFrame) -> None:

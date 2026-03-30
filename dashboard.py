@@ -546,30 +546,21 @@ def render_topx_table(df: pd.DataFrame) -> None:
         </tr>
         """
 
-    volume_headers = """
-                    <th>Total Vol</th>
-                    <th>Δ Vol</th>
-                    <th>Liquidity</th>""" if has_volume else ""
+    if has_volume:
+        extra_headers = "<th>Total Vol</th><th>Δ Vol</th><th>Liquidity</th>"
+    else:
+        extra_headers = ""
 
-    st.markdown(
-        f"""
-        <table class="signal-table">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Market</th>
-                    <th>Outcome</th>
-                    <th>Category</th>
-                    <th>Composite ↑↓</th>
-                    <th>Vol Z-Score</th>
-                    {volume_headers}
-                </tr>
-            </thead>
-            <tbody>{rows_html}</tbody>
-        </table>
-        """,
-        unsafe_allow_html=True,
+    table_html = (
+        '<table class="signal-table"><thead><tr>'
+        "<th>#</th><th>Market</th><th>Outcome</th><th>Category</th>"
+        "<th>Composite ↑↓</th><th>Vol Z-Score</th>"
+        + extra_headers
+        + "</tr></thead><tbody>"
+        + rows_html
+        + "</tbody></table>"
     )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def render_rank_trend(df: pd.DataFrame) -> None:

@@ -236,13 +236,7 @@ def main() -> None:
     )
 
     # -- Step 1: Ensure schema is current -----------------------------------
-    try:
-        ensure_schema(cur)
-        conn.commit()
-    except Exception as exc:
-        log.error(f"Schema migration failed: {exc}", exc_info=True)
-        conn.rollback()
-        raise   # fatal — don't proceed if schema is uncertain
+    # Schema already migrated — skip ensure_schema
 
     # -- Step 2: Rollup prior day -------------------------------------------
     try:

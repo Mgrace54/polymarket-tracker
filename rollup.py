@@ -261,6 +261,14 @@ def main() -> None:
 
     # -- Step 4: Deactivate stale markets ----------------------------------
     try:
+        cur.execute("DELETE FROM spike_signals WHERE computed_at < NOW() - INTERVAL '14 days'")
+        deleted = cur.rowcount
+        conn.commit()
+        log.info(f"spike_signals purge: {deleted} rows deleted")
+    except Exception as exc:
+        log.error(f"spike_signals purge failed: {exc}", exc_info=True)
+        conn.rollback()
+    try:
         deactivated = deactivate_stale_markets(cur, stale_cutoff)
         conn.commit()
         log.info(f"Stale market deactivation committed: {deactivated} markets")
